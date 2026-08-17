@@ -3,6 +3,8 @@ package cli
 import (
 	"io/fs"
 	"path/filepath"
+
+	"github.com/owncloud/ocsign/internal/manifest"
 )
 
 // vcsMarker is the entry name that identifies a version-control checkout. A
@@ -11,17 +13,32 @@ import (
 // only, never from the working tree.
 const vcsMarker = ".git"
 
-// findVCSMarker returns the path of the first .git entry at or under root, or ""
-// when the tree carries none.
+// findVCSMarker returns the path of the first .git entry at or under root that
+// the manifest for mode would hash, or "" when the tree carries none.
 //
 // Both a directory (ordinary clone) and a regular file (worktree or submodule
 // gitlink) count: either one means root is a checkout rather than an app
 // payload, and neither belongs in a signed app.
-func findVCSMarker(root string) (string, error) {
+//
+// Subtrees the manifest excludes for mode are skipped, because a marker there is
+// no evidence of a mis-aimed --path: core mode drops whole top-level trees
+// (data/, apps/, ...), and on a real server root a .git under a user's synced
+// folder or a git-installed app is commonplace. Skipping them also spares the
+// walk a full traversal of the data directory.
+func findVCSMarker(root string, mode manifest.Mode) (string, error) {
 	var found string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			if manifest.ExcludesSubtree(filepath.ToSlash(rel), mode) {
+				return fs.SkipDir
+			}
 		}
 		if d.Name() != vcsMarker {
 			return nil

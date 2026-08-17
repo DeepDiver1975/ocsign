@@ -43,6 +43,26 @@ var cruftBaseNames = map[string]struct{}{
 // item 3).
 var cruftPattern = regexp.MustCompile(`^\.webapp-owncloud-.*`)
 
+// ExcludesSubtree reports whether every manifest key under the directory dirKey
+// (a forward-slash relative path, "." for the root) is excluded for mode, so a
+// walker may skip the directory wholesale.
+//
+// Only core mode's top-level folder exclusion has that property. The cruft rules
+// match base filenames, so a directory whose own name is cruft (e.g. a directory
+// literally called .directory) still holds files that are hashed, and the exact
+// path exclusions cover single files.
+func ExcludesSubtree(dirKey string, mode Mode) bool {
+	if mode != ModeCore || dirKey == "" || dirKey == "." {
+		return false
+	}
+	top := dirKey
+	if i := strings.IndexByte(dirKey, '/'); i >= 0 {
+		top = dirKey[:i]
+	}
+	_, ok := coreTopLevelExcludedDirs[top]
+	return ok
+}
+
 // isExcluded reports whether the manifest key (a forward-slash relative path)
 // must be excluded from the manifest for the given mode (§3.2 app, §3.6 core).
 func isExcluded(key string, mode Mode) bool {
@@ -67,13 +87,10 @@ func isExcluded(key string, mode Mode) bool {
 			return true
 		}
 		// Top-level folder exclusion on the first path segment only, so
-		// apps/foo.php is excluded but core/apps-like/x.php is kept.
-		top := key
-		if i := strings.IndexByte(key, '/'); i >= 0 {
-			top = key[:i]
-		}
-		_, ok := coreTopLevelExcludedDirs[top]
-		return ok
+		// apps/foo.php is excluded but core/apps-like/x.php is kept. Shared with
+		// ExcludesSubtree so the manifest and its callers cannot disagree about
+		// which trees are excluded.
+		return ExcludesSubtree(key, mode)
 	}
 
 	return key == appSignatureFile

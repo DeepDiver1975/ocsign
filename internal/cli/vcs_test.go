@@ -3,6 +3,7 @@ package cli_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -12,15 +13,39 @@ func signature(tree string) string {
 	return filepath.Join(tree, "appinfo", "signature.json")
 }
 
+// makeCheckout turns tree into what a repository working copy looks like to the
+// signer: a .git directory holding files. The two named here are the ones the
+// files_antivirus v1.3.1 manifest actually hashed, and they matter — a manifest
+// hashes files, never directories, so an empty .git directory would not
+// reproduce the harm the guard exists to prevent.
+func makeCheckout(t *testing.T, tree string) {
+	t.Helper()
+	writeTreeFile(t, tree, ".git/config", "[core]\n\trepositoryformatversion = 0\n")
+	writeTreeFile(t, tree, ".git/index", "DIRC\x00\x00\x00\x02")
+}
+
+// symlinkTo returns a symlink named "link" in a fresh temp dir pointing at
+// target, skipping the test where symlinks are unavailable (unprivileged
+// Windows).
+func symlinkTo(t *testing.T, target string) string {
+	t.Helper()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		t.Fatalf("symlink: %v", err)
+	}
+	return link
+}
+
 // TestRefusesRepoCheckout: a --path holding a .git directory is a checkout, not
 // an app payload -> input error, exit 1, and nothing written. This is the guard
 // against the files_antivirus v1.3.1 failure, where the signed tree was the
 // working copy and the manifest hashed .git/config and .git/index.
 func TestRefusesRepoCheckout(t *testing.T) {
 	tree := copyTree(t, "tree-basic")
-	if err := os.MkdirAll(filepath.Join(tree, ".git", "objects"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	makeCheckout(t, tree)
 
 	code, _, stderr := run(t,
 		"--path", tree,
@@ -61,9 +86,7 @@ func TestRefusesGitlinkFile(t *testing.T) {
 // or submodule checkout below the app root is caught too.
 func TestRefusesNestedRepoCheckout(t *testing.T) {
 	tree := copyTree(t, "tree-basic")
-	if err := os.MkdirAll(filepath.Join(tree, "vendor", "dep", ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeTreeFile(t, tree, "vendor/dep/.git/config", "[core]\n")
 
 	code, _, stderr := run(t,
 		"--path", tree,
@@ -79,9 +102,7 @@ func TestRefusesNestedRepoCheckout(t *testing.T) {
 // manifest built from a checkout is still wrong, so the guard applies there too.
 func TestRefusesRepoCheckoutOnDryRun(t *testing.T) {
 	tree := copyTree(t, "tree-basic")
-	if err := os.MkdirAll(filepath.Join(tree, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	makeCheckout(t, tree)
 
 	code, stdout, _ := run(t,
 		"--path", tree,
@@ -97,13 +118,107 @@ func TestRefusesRepoCheckoutOnDryRun(t *testing.T) {
 	}
 }
 
+// TestRefusesSymlinkedRepoCheckout: a symlinked --path must not defeat the
+// guard. filepath.WalkDir does not descend into a symlinked root -- it yields the
+// link and stops -- so without resolving the root first the walk sees a clean
+// one-entry tree, and manifest.Build (which walks the same way) would sign an
+// empty manifest.
+func TestRefusesSymlinkedRepoCheckout(t *testing.T) {
+	tree := copyTree(t, "tree-basic")
+	makeCheckout(t, tree)
+	link := symlinkTo(t, tree)
+
+	code, stdout, stderr := run(t,
+		"--path", link,
+		"--key", key(t, "ec-leaf.key"),
+		"--cert", key(t, "ec-leaf.crt"),
+		"--dry-run",
+	)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1; stdout: %s", code, stdout)
+	}
+	if !strings.Contains(stderr, "repository checkout") {
+		t.Errorf("stderr should name the cause, got %q", stderr)
+	}
+}
+
+// TestSymlinkedPathSignsRealTree is the other half of resolving the root: a
+// symlinked --path over a clean tree must sign that tree's files, not an empty
+// manifest that would nonetheless carry a valid signature.
+func TestSymlinkedPathSignsRealTree(t *testing.T) {
+	tree := copyTree(t, "tree-basic")
+	link := symlinkTo(t, tree)
+
+	code, stdout, stderr := run(t,
+		"--path", link,
+		"--key", key(t, "ec-leaf.key"),
+		"--cert", key(t, "ec-leaf.crt"),
+		"--dry-run",
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"appinfo/info.xml", "js/app.js", "lib/Controller/Page.php"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("manifest should hash %q through the symlink, got:\n%s", want, stdout)
+		}
+	}
+}
+
 // TestRefusesCoreRepoCheckout: signing the core server root from a checkout is
-// the same mistake, so --core is guarded identically.
+// the same mistake, so --core is guarded identically -- with wording that fits
+// core, which has no packaged app payload to point the operator at.
 func TestRefusesCoreRepoCheckout(t *testing.T) {
 	tree := copyTree(t, "tree-core")
-	if err := os.MkdirAll(filepath.Join(tree, ".git"), 0o755); err != nil {
-		t.Fatal(err)
+	makeCheckout(t, tree)
+
+	code, _, stderr := run(t,
+		"--path", tree,
+		"--key", key(t, "ec-leaf.key"),
+		"--cert", key(t, "ec-core-leaf.crt"),
+		"--core",
+	)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1; stderr: %s", code, stderr)
 	}
+	if !strings.Contains(stderr, "core server root") {
+		t.Errorf("core refusal should name the core server root, got %q", stderr)
+	}
+	if strings.Contains(stderr, "appstore") {
+		t.Errorf("core refusal must not advise signing an app payload, got %q", stderr)
+	}
+}
+
+// TestCoreAllowsMarkerInExcludedSubtree: in core mode the manifest excludes whole
+// top-level trees (apps/, data/, ...), so a .git there can never be hashed and is
+// no evidence of a mis-aimed --path. Both shapes are ordinary on a live server:
+// an app installed with git clone, and a user's git repo synced into their files.
+// Refusing them would push operators to --allow-vcs, which would switch the guard
+// off for the core tree as well.
+func TestCoreAllowsMarkerInExcludedSubtree(t *testing.T) {
+	tree := copyTree(t, "tree-core")
+	writeTreeFile(t, tree, "apps/myapp/.git/config", "[core]\n")
+	writeTreeFile(t, tree, "data/alice/files/proj/.git/config", "[core]\n")
+
+	code, _, stderr := run(t,
+		"--path", tree,
+		"--key", key(t, "ec-leaf.key"),
+		"--cert", key(t, "ec-core-leaf.crt"),
+		"--core",
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "core", "signature.json")); err != nil {
+		t.Errorf("core root should sign: %v", err)
+	}
+}
+
+// TestRefusesCoreMarkerInHashedSubtree pins the counterpart: outside the excluded
+// top-level trees a marker is hashed, so core mode still refuses.
+func TestRefusesCoreMarkerInHashedSubtree(t *testing.T) {
+	tree := copyTree(t, "tree-core")
+	writeTreeFile(t, tree, "core/js/.git/config", "[core]\n")
 
 	code, _, stderr := run(t,
 		"--path", tree,
@@ -116,13 +231,31 @@ func TestRefusesCoreRepoCheckout(t *testing.T) {
 	}
 }
 
+// TestAppModeRefusesMarkerInCoreExcludedDir: the exclusions are core-mode only.
+// An app that ships an apps/ or data/ directory has it hashed, so a .git there is
+// still a refusal in app mode.
+func TestAppModeRefusesMarkerInCoreExcludedDir(t *testing.T) {
+	tree := copyTree(t, "tree-basic")
+	writeTreeFile(t, tree, "data/.git/config", "[core]\n")
+
+	code, _, stderr := run(t,
+		"--path", tree,
+		"--key", key(t, "ec-leaf.key"),
+		"--cert", key(t, "ec-leaf.crt"),
+	)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "the app") {
+		t.Errorf("app refusal should name the app, got %q", stderr)
+	}
+}
+
 // TestAllowVCSOverride: --allow-vcs signs a checkout deliberately, for the
 // developer who signs an app in place to exercise verification locally.
 func TestAllowVCSOverride(t *testing.T) {
 	tree := copyTree(t, "tree-basic")
-	if err := os.MkdirAll(filepath.Join(tree, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	makeCheckout(t, tree)
 
 	code, _, stderr := run(t,
 		"--path", tree,

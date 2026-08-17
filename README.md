@@ -91,6 +91,12 @@ verifies, because the manifest genuinely describes the tree that was signed.
 a directory from an ordinary clone, or a regular file from a worktree or
 submodule gitlink — and exits 1 before reading any key material.
 
+Only markers the manifest would actually hash count. With `--core` the manifest
+excludes the top-level `data/`, `apps/`, `themes/`, `config/`, `assets/` and
+`lost+found/` (spec §3.6), so a `.git` there — an app installed with `git clone`,
+or a user's repository synced into their files — is not a refusal. A symlinked
+`--path` is resolved first, so the check always sees the real tree.
+
 Pass `--allow-vcs` to sign anyway. The one legitimate use is signing a
 development checkout in place to exercise verification locally; it should never
 appear in a release pipeline.

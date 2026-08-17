@@ -33,6 +33,7 @@ type options struct {
 	cert        string
 	chain       string
 	core        bool
+	allowVCS    bool
 	attest      bool
 	attestURL   string
 	out         string
@@ -79,6 +80,7 @@ func parseFlags(args []string, stderr io.Writer) (*options, error) {
 	fs.StringVar(&opts.cert, "cert", "", "path to the issued leaf certificate PEM (required)")
 	fs.StringVar(&opts.chain, "chain", "", "path to a PEM file with intermediate cert(s) to embed")
 	fs.BoolVar(&opts.core, "core", false, `sign the core server root (leaf CN must be "core"); writes core/signature.json`)
+	fs.BoolVar(&opts.allowVCS, "allow-vcs", false, "sign even when --path holds a .git entry (in-place development checkouts)")
 	fs.BoolVar(&opts.attest, "attest", false, "attach a Mode-2 attestation token (not yet implemented)")
 	fs.StringVar(&opts.attestURL, "attest-repo", "", "owner/repo of the attestation workflow")
 	fs.StringVar(&opts.out, "out", "", "override output path for signature.json")
@@ -139,6 +141,26 @@ func run(opts *options, stdout io.Writer) error {
 	}
 	if !info.IsDir() {
 		return coded(exitUsage, fmt.Errorf("--path %q is not a directory", opts.path))
+	}
+
+	// A --path aimed at a repository checkout instead of the packaged app is the
+	// one input error that still yields a technically valid signature: the
+	// manifest simply hashes .git internals, tests and CI config as part of the
+	// app, and whatever is packaged from that tree ships them. Nothing
+	// downstream can distinguish it from a correct signature, so refuse here --
+	// before any key material is read.
+	if !opts.allowVCS {
+		marker, err := findVCSMarker(opts.path)
+		if err != nil {
+			return coded(exitUsage, fmt.Errorf("--path: %w", err))
+		}
+		if marker != "" {
+			return coded(exitUsage, fmt.Errorf(
+				"--path %q is a repository checkout (found %q): the manifest would hash "+
+					"version-control internals as part of the app. Sign the packaged app "+
+					"payload instead (e.g. build/artifacts/appstore/<app>), or pass "+
+					"--allow-vcs to sign this tree anyway", opts.path, marker))
+		}
 	}
 
 	key, err := keys.LoadPrivateKey(opts.key)

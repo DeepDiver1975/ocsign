@@ -52,6 +52,8 @@ Optional:
                     certificates.chain[]. If omitted, chain[] is left empty.
   --core            Sign the core server root: write core/signature.json and apply
                     the core file-set rules (spec §3.6).
+  --allow-vcs       Sign even when --path holds a .git entry. Off by default; see
+                    "Repository checkouts are refused" below.
   --out  string     Override output path (default: <path>/appinfo/signature.json,
                     or <path>/core/signature.json with --core).
   --dry-run         Compute and print the manifest + would-be signature.json to
@@ -59,7 +61,8 @@ Optional:
 
 Exit codes:
   0  success
-  1  usage / input error (missing flag, unreadable key/cert/path)
+  1  usage / input error (missing flag, unreadable key/cert/path, --path is a
+     repository checkout)
   2  signing error (key/cert mismatch, unsupported key type)
   3  attestation error (--attest requested but workflow failed)
 ```
@@ -72,6 +75,25 @@ ocsign --path ./example-app \
        --cert leaf.crt \
        --chain intermediate.crt
 ```
+
+### Repository checkouts are refused
+
+`--path` must point at the **app payload** — the staging directory a release
+tarball is built from, e.g. `build/artifacts/appstore/<app>` — not at the
+repository working tree. In app mode the manifest hashes *everything* under
+`--path` bar `appinfo/signature.json` and OS cruft, so signing a checkout
+produces a signature that legitimizes `.git` internals, tests and CI config as
+part of the app.
+
+Nothing downstream can tell such a signature apart from a correct one: it
+verifies, because the manifest genuinely describes the tree that was signed.
+`ocsign` therefore refuses when `--path` contains a `.git` entry at any depth —
+a directory from an ordinary clone, or a regular file from a worktree or
+submodule gitlink — and exits 1 before reading any key material.
+
+Pass `--allow-vcs` to sign anyway. The one legitimate use is signing a
+development checkout in place to exercise verification locally; it should never
+appear in a release pipeline.
 
 ## Building
 

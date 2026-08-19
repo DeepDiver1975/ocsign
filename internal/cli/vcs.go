@@ -13,12 +13,15 @@ import (
 // only, never from the working tree.
 const vcsMarker = ".git"
 
-// findVCSMarker returns the path of the first .git entry at or under root that
-// the manifest for mode would hash, or "" when the tree carries none.
+// findVCSMarker returns the path of the first .git entry at or under root within
+// the file set the manifest covers for mode, or "" when the tree carries none.
 //
 // Both a directory (ordinary clone) and a regular file (worktree or submodule
-// gitlink) count: either one means root is a checkout rather than an app
-// payload, and neither belongs in a signed app.
+// gitlink) count, and the marker's own contents are irrelevant: an empty .git, a
+// .git symlink, or one holding nothing the manifest hashes still means root is a
+// working tree rather than an app payload. The marker is the evidence, not the
+// harm -- the harm is the rest of that tree, the tests and CI config the
+// manifest does hash. `rsync -a --exclude='.git/*'` leaves exactly that shape.
 //
 // Subtrees the manifest excludes for mode are skipped, because a marker there is
 // no evidence of a mis-aimed --path: core mode drops whole top-level trees

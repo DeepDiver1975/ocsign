@@ -15,9 +15,7 @@ func signature(tree string) string {
 
 // makeCheckout turns tree into what a repository working copy looks like to the
 // signer: a .git directory holding files. The two named here are the ones the
-// files_antivirus v1.3.1 manifest actually hashed, and they matter — a manifest
-// hashes files, never directories, so an empty .git directory would not
-// reproduce the harm the guard exists to prevent.
+// files_antivirus v1.3.1 manifest actually hashed.
 func makeCheckout(t *testing.T, tree string) {
 	t.Helper()
 	writeTreeFile(t, tree, ".git/config", "[core]\n\trepositoryformatversion = 0\n")
@@ -69,6 +67,50 @@ func TestRefusesGitlinkFile(t *testing.T) {
 	tree := copyTree(t, "tree-basic")
 	gitlink := filepath.Join(tree, ".git")
 	if err := os.WriteFile(gitlink, []byte("gitdir: /elsewhere/.git/worktrees/x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := run(t,
+		"--path", tree,
+		"--key", key(t, "ec-leaf.key"),
+		"--cert", key(t, "ec-leaf.crt"),
+	)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1; stderr: %s", code, stderr)
+	}
+}
+
+// TestRefusesEmptyMarkerDirectory: a manifest hashes files, never directories, so
+// an empty .git contributes no manifest key of its own -- and is refused all the
+// same. It is what `rsync -a --exclude='.git/*'` leaves behind, over a working
+// tree whose tests and CI config the manifest still hashes whole. Narrowing the
+// guard to markers that are themselves hashed would wave that payload through,
+// which is why the refusal is phrased around the checkout, not around .git.
+func TestRefusesEmptyMarkerDirectory(t *testing.T) {
+	tree := copyTree(t, "tree-basic")
+	if err := os.Mkdir(filepath.Join(tree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := run(t,
+		"--path", tree,
+		"--key", key(t, "ec-leaf.key"),
+		"--cert", key(t, "ec-leaf.crt"),
+	)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1; stderr: %s", code, stderr)
+	}
+}
+
+// TestRefusesMarkerSymlink: relocated and shared gitdir setups make .git a
+// symlink. manifest.Build never hashes a symlink (spec §3.1), so this marker
+// contributes nothing either, while the working tree around it is hashed in full.
+func TestRefusesMarkerSymlink(t *testing.T) {
+	tree := copyTree(t, "tree-basic")
+	if err := os.Symlink("/elsewhere/repo/.git", filepath.Join(tree, ".git")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
 		t.Fatal(err)
 	}
 

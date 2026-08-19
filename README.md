@@ -91,15 +91,20 @@ verifies, because the manifest genuinely describes the tree that was signed.
 a directory from an ordinary clone, or a regular file from a worktree or
 submodule gitlink — and exits 1 before reading any key material.
 
-Only markers the manifest would actually hash count. With `--core` the manifest
-excludes the top-level `data/`, `apps/`, `themes/`, `config/`, `assets/` and
-`lost+found/` (spec §3.6), so a `.git` there — an app installed with `git clone`,
-or a user's repository synced into their files — is not a refusal. A symlinked
-`--path` is resolved first, so the check always sees the real tree.
+The marker is the evidence, not the harm, so its own contents are irrelevant — an
+empty `.git` is refused too. `rsync -a --exclude='.git/*'` leaves exactly that
+shape: an empty marker over a working tree whose tests and CI config the manifest
+still hashes whole.
 
-Pass `--allow-vcs` to sign anyway. The one legitimate use is signing a
-development checkout in place to exercise verification locally; it should never
-appear in a release pipeline.
+Only the file set the manifest covers is searched. With `--core` that excludes the
+top-level `data/`, `apps/`, `themes/`, `config/`, `assets/` and `lost+found/`
+(spec §3.6), so a `.git` there — an app installed with `git clone`, or a user's
+repository synced into their files — is not a refusal. A symlinked `--path` is
+resolved first, so the check always sees the real tree.
+
+Pass `--allow-vcs` to sign anyway; the use for it is signing a development
+checkout in place to exercise verification locally. A release pipeline should
+package the payload first and point `--path` at that instead.
 
 ## Building
 

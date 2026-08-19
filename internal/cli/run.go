@@ -156,10 +156,11 @@ func run(opts *options, stdout io.Writer) error {
 
 	// A --path aimed at a repository checkout instead of the packaged app is the
 	// one input error that still yields a technically valid signature: the
-	// manifest simply hashes .git internals, tests and CI config as part of the
-	// app, and whatever is packaged from that tree ships them. Nothing
+	// manifest hashes tests, CI config and version-control internals as part of
+	// the app, and whatever is packaged from that tree ships them. Nothing
 	// downstream can distinguish it from a correct signature, so refuse here --
-	// before any key material is read.
+	// before any key material is read. The .git entry is only the evidence; the
+	// cost is everything around it that the manifest does hash.
 	if !opts.allowVCS {
 		marker, err := findVCSMarker(root, mode)
 		if err != nil {
@@ -173,8 +174,9 @@ func run(opts *options, stdout io.Writer) error {
 				subject, remedy = "the core server root", "Sign an unpacked release tarball instead"
 			}
 			return coded(exitUsage, fmt.Errorf(
-				"--path %q is a repository checkout (found %q): the manifest would hash "+
-					"version-control internals as part of %s. %s, or pass --allow-vcs to "+
+				"--path %q is a repository checkout, not a packaged payload (found %q): "+
+					"signing it would hash whatever else the checkout carries -- tests, CI "+
+					"config, build scratch -- as part of %s. %s, or pass --allow-vcs to "+
 					"sign this tree anyway", opts.path, marker, subject, remedy))
 		}
 	}

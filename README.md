@@ -52,6 +52,8 @@ Optional:
                     certificates.chain[]. If omitted, chain[] is left empty.
   --core            Sign the core server root: write core/signature.json and apply
                     the core file-set rules (spec §3.6).
+  --allow-vcs       Sign even when --path holds a .git entry. Off by default; see
+                    "Repository checkouts are refused" below.
   --out  string     Override output path (default: <path>/appinfo/signature.json,
                     or <path>/core/signature.json with --core).
   --dry-run         Compute and print the manifest + would-be signature.json to
@@ -59,7 +61,8 @@ Optional:
 
 Exit codes:
   0  success
-  1  usage / input error (missing flag, unreadable key/cert/path)
+  1  usage / input error (missing flag, unreadable key/cert/path, --path is a
+     repository checkout)
   2  signing error (key/cert mismatch, unsupported key type)
   3  attestation error (--attest requested but workflow failed)
 ```
@@ -72,6 +75,36 @@ ocsign --path ./example-app \
        --cert leaf.crt \
        --chain intermediate.crt
 ```
+
+### Repository checkouts are refused
+
+`--path` must point at the **app payload** — the staging directory a release
+tarball is built from, e.g. `build/artifacts/appstore/<app>` — not at the
+repository working tree. In app mode the manifest hashes *everything* under
+`--path` bar `appinfo/signature.json` and OS cruft, so signing a checkout
+produces a signature that legitimizes `.git` internals, tests and CI config as
+part of the app.
+
+Nothing downstream can tell such a signature apart from a correct one: it
+verifies, because the manifest genuinely describes the tree that was signed.
+`ocsign` therefore refuses when `--path` contains a `.git` entry at any depth —
+a directory from an ordinary clone, or a regular file from a worktree or
+submodule gitlink — and exits 1 before reading any key material.
+
+The marker is the evidence, not the harm, so its own contents are irrelevant — an
+empty `.git` is refused too. `rsync -a --exclude='.git/*'` leaves exactly that
+shape: an empty marker over a working tree whose tests and CI config the manifest
+still hashes whole.
+
+Only the file set the manifest covers is searched. With `--core` that excludes the
+top-level `data/`, `apps/`, `themes/`, `config/`, `assets/` and `lost+found/`
+(spec §3.6), so a `.git` there — an app installed with `git clone`, or a user's
+repository synced into their files — is not a refusal. A symlinked `--path` is
+resolved first, so the check always sees the real tree.
+
+Pass `--allow-vcs` to sign anyway; the use for it is signing a development
+checkout in place to exercise verification locally. A release pipeline should
+package the payload first and point `--path` at that instead.
 
 ## Building
 

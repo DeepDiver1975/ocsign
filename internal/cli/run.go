@@ -33,6 +33,7 @@ type options struct {
 	cert        string
 	chain       string
 	core        bool
+	allowVCS    bool
 	attest      bool
 	attestURL   string
 	out         string
@@ -79,6 +80,7 @@ func parseFlags(args []string, stderr io.Writer) (*options, error) {
 	fs.StringVar(&opts.cert, "cert", "", "path to the issued leaf certificate PEM (required)")
 	fs.StringVar(&opts.chain, "chain", "", "path to a PEM file with intermediate cert(s) to embed")
 	fs.BoolVar(&opts.core, "core", false, `sign the core server root (leaf CN must be "core"); writes core/signature.json`)
+	fs.BoolVar(&opts.allowVCS, "allow-vcs", false, "sign even when --path holds a .git entry (in-place development checkouts)")
 	fs.BoolVar(&opts.attest, "attest", false, "attach a Mode-2 attestation token (not yet implemented)")
 	fs.StringVar(&opts.attestURL, "attest-repo", "", "owner/repo of the attestation workflow")
 	fs.StringVar(&opts.out, "out", "", "override output path for signature.json")
@@ -141,6 +143,44 @@ func run(opts *options, stdout io.Writer) error {
 		return coded(exitUsage, fmt.Errorf("--path %q is not a directory", opts.path))
 	}
 
+	// filepath.WalkDir lstats its root and does not descend when that root is a
+	// symlink -- it yields the link itself and stops. A symlinked --path (a
+	// staging dir published as a stable name, say) would therefore make the
+	// checkout guard below see a one-entry tree and report it clean, and
+	// manifest.Build produce an empty manifest under a perfectly valid signature.
+	// Resolve the root once here so both walk the real tree.
+	root, err := filepath.EvalSymlinks(opts.path)
+	if err != nil {
+		return coded(exitUsage, fmt.Errorf("--path: %w", err))
+	}
+
+	// A --path aimed at a repository checkout instead of the packaged app is the
+	// one input error that still yields a technically valid signature: the
+	// manifest hashes tests, CI config and version-control internals as part of
+	// the app, and whatever is packaged from that tree ships them. Nothing
+	// downstream can distinguish it from a correct signature, so refuse here --
+	// before any key material is read. The .git entry is only the evidence; the
+	// cost is everything around it that the manifest does hash.
+	if !opts.allowVCS {
+		marker, err := findVCSMarker(root, mode)
+		if err != nil {
+			return coded(exitUsage, fmt.Errorf("--path: %w", err))
+		}
+		if marker != "" {
+			// The remedy differs by mode: an app has a packaged payload to point
+			// at, the core server root does not.
+			subject, remedy := "the app", "Sign the packaged app payload instead (e.g. build/artifacts/appstore/<app>)"
+			if opts.core {
+				subject, remedy = "the core server root", "Sign an unpacked release tarball instead"
+			}
+			return coded(exitUsage, fmt.Errorf(
+				"--path %q is a repository checkout, not a packaged payload (found %q): "+
+					"signing it would hash whatever else the checkout carries -- tests, CI "+
+					"config, build scratch -- as part of %s. %s, or pass --allow-vcs to "+
+					"sign this tree anyway", opts.path, marker, subject, remedy))
+		}
+	}
+
 	key, err := keys.LoadPrivateKey(opts.key)
 	if err != nil {
 		return coded(exitUsage, fmt.Errorf("--key: %w", err))
@@ -161,7 +201,7 @@ func run(opts *options, stdout io.Writer) error {
 				"cert CN %q does not match reserved core identity %q", cert.Subject.CommonName, coreIdentity))
 		}
 	} else {
-		appID, err := appinfo.AppID(opts.path)
+		appID, err := appinfo.AppID(root)
 		if err != nil {
 			return coded(exitSigning, err)
 		}
@@ -184,7 +224,7 @@ func run(opts *options, stdout io.Writer) error {
 	}
 
 	// Build the canonical manifest bytes M and sign them (§3, §4).
-	m, err := manifest.Build(opts.path, mode)
+	m, err := manifest.Build(root, mode)
 	if err != nil {
 		return coded(exitUsage, fmt.Errorf("build manifest: %w", err))
 	}
@@ -225,9 +265,9 @@ func run(opts *options, stdout io.Writer) error {
 	outPath := opts.out
 	if outPath == "" {
 		if opts.core {
-			outPath = filepath.Join(opts.path, "core", "signature.json")
+			outPath = filepath.Join(root, "core", "signature.json")
 		} else {
-			outPath = filepath.Join(opts.path, "appinfo", "signature.json")
+			outPath = filepath.Join(root, "appinfo", "signature.json")
 		}
 	}
 	if err := os.WriteFile(outPath, out, 0o644); err != nil {
